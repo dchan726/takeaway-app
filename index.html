@@ -8,7 +8,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, getDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc, collection, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // 您的專屬 Firebase 設定
         const firebaseConfig = {
@@ -20,15 +20,11 @@
             appId: "1:134175730363:web:393756d54eaf23ef20d79e"
         };
 
-        // 初始化 Firebase
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        
-        // 設定一個固定的集合名稱，方便在您的資料庫中尋找
         const appId = 'takeaway-main-data'; 
 
-        // 預設為今日日期
         const getTodayDate = () => {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -41,19 +37,17 @@
             currentRestaurant: "預設餐廳"
         };
         
+        // 加入 auditLogs 與 hasBeenLocked
         window.dailyState = {
-            orders: [],
-            extraCharge: 0,
-            discount: 1,
-            overrides: {},
-            isLocked: false
+            orders: [], extraCharge: 0, discount: 1, overrides: {}, 
+            isLocked: false, hasBeenLocked: false, auditLogs: []
         };
 
         let user = null;
         let dailyUnsubscribe = null;
         window.activeItemIdx = null;
+        window.editItemIdx = null;
 
-        // 全局 Toast 提示功能
         window.showToast = (msg, isError = false) => {
             const toast = document.getElementById('global-toast');
             toast.innerText = msg;
@@ -64,24 +58,12 @@
 
         window.syncShared = async () => {
             if (!user || !db) return;
-            try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'shared', 'main');
-                await setDoc(docRef, window.sharedState);
-            } catch (e) {
-                console.error("Shared sync error:", e);
-                throw e;
-            }
+            try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shared', 'main'), window.sharedState); } catch (e) {}
         };
 
         window.syncDaily = async () => {
             if (!user || !db) return;
-            try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'daily', window.currentDate);
-                await setDoc(docRef, window.dailyState);
-            } catch (e) {
-                console.error("Daily sync error:", e);
-                throw e;
-            }
+            try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'daily', window.currentDate), window.dailyState); } catch (e) {}
         };
 
         const setupDailyListener = () => {
@@ -91,12 +73,14 @@
             
             getDoc(docRef).then(snap => {
                 if (!snap.exists()) {
-                    window.dailyState = { orders: [], extraCharge: 0, discount: 1, overrides: {}, isLocked: false };
+                    window.dailyState = { orders: [], extraCharge: 0, discount: 1, overrides: {}, isLocked: false, hasBeenLocked: false, auditLogs: [] };
                     window.syncDaily().catch(()=>{});
                 } else {
                     window.dailyState = snap.data();
                     if(window.dailyState.isLocked === undefined) window.dailyState.isLocked = false;
+                    if(window.dailyState.hasBeenLocked === undefined) window.dailyState.hasBeenLocked = false;
                     if(!window.dailyState.overrides) window.dailyState.overrides = {};
+                    if(!window.dailyState.auditLogs) window.dailyState.auditLogs = [];
                 }
                 window.renderAll();
                 
@@ -104,13 +88,10 @@
                     if (s.exists()) {
                         window.dailyState = s.data();
                         if(window.dailyState.isLocked === undefined) window.dailyState.isLocked = false;
+                        if(window.dailyState.hasBeenLocked === undefined) window.dailyState.hasBeenLocked = false;
                         if(!window.dailyState.overrides) window.dailyState.overrides = {};
+                        if(!window.dailyState.auditLogs) window.dailyState.auditLogs = [];
                         window.renderAll();
-                    }
-                }, (err) => {
-                    console.error("Firestore daily error", err);
-                    if (err.code === 'permission-denied') {
-                        window.showToast("資料庫權限不足，請檢查 Firebase 規則", true);
                     }
                 });
             });
@@ -118,12 +99,7 @@
 
         const initAuth = async () => {
             if (!auth) return;
-            try {
-                await signInAnonymously(auth);
-            } catch (error) {
-                console.error("Auth Error:", error);
-                window.showToast("登入失敗，請確認已在 Firebase 開啟匿名登入", true);
-            }
+            try { await signInAnonymously(auth); } catch (error) { window.showToast("登入失敗", true); }
         };
 
         if (auth) {
@@ -133,40 +109,54 @@
                     const sharedRef = doc(db, 'artifacts', appId, 'public', 'data', 'shared', 'main');
                     try {
                         const sharedSnap = await getDoc(sharedRef);
-                        if (!sharedSnap.exists()) {
-                            await setDoc(sharedRef, window.sharedState).catch(()=>{});
-                        } else {
-                            window.sharedState = sharedSnap.data();
-                        }
-                    } catch(e) {
-                        if(e.code === 'permission-denied') {
-                            window.showToast("設定檔權限不足，請檢查 Firebase 規則", true);
-                        }
-                    }
+                        if (!sharedSnap.exists()) await setDoc(sharedRef, window.sharedState).catch(()=>{});
+                        else window.sharedState = sharedSnap.data();
+                    } catch(e) {}
                     
-                    onSnapshot(sharedRef, (s) => {
-                        if (s.exists()) {
-                            window.sharedState = s.data();
-                            window.renderAll();
-                        }
-                    });
-
+                    onSnapshot(sharedRef, (s) => { if (s.exists()) { window.sharedState = s.data(); window.renderAll(); } });
                     setupDailyListener();
                 }
             });
         }
 
         window.changeDate = (newDate) => {
-            if(!newDate) return;
-            window.currentDate = newDate;
-            document.getElementById('global-date').value = window.currentDate;
-            setupDailyListener();
+            if(!newDate) return; window.currentDate = newDate;
+            document.getElementById('global-date').value = window.currentDate; setupDailyListener();
         };
 
-        window.jumpToDate = (date) => {
-            window.changeDate(date);
-            window.showTab('pay');
+        window.changeToActiveDate = async (direction) => {
+            if (!db) return;
+            const btnId = direction === -1 ? 'btn-prev-date' : 'btn-next-date';
+            const btn = document.getElementById(btnId);
+            const originalText = btn.innerText; btn.innerText = '⋯'; btn.disabled = true;
+
+            try {
+                const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'daily'));
+                let activeDates = [];
+                snap.forEach(docSnap => {
+                    if (docSnap.data().orders && docSnap.data().orders.length > 0) activeDates.push(docSnap.id);
+                });
+                activeDates.sort();
+
+                if (activeDates.length === 0) return window.showToast("目前沒有任何訂單紀錄", true);
+
+                const curr = window.currentDate; let targetDate = null;
+                if (direction === -1) {
+                    const prevDates = activeDates.filter(d => d < curr);
+                    if (prevDates.length > 0) targetDate = prevDates[prevDates.length - 1];
+                } else {
+                    const nextDates = activeDates.filter(d => d > curr);
+                    if (nextDates.length > 0) targetDate = nextDates[0];
+                }
+
+                if (targetDate) window.changeDate(targetDate);
+                else window.showToast(direction === -1 ? "已經是最早的訂單紀錄" : "沒有更晚的訂單紀錄", true);
+            } finally {
+                btn.innerText = originalText; btn.disabled = false;
+            }
         };
+
+        window.jumpToDate = (date) => { window.changeDate(date); window.showTab('pay'); };
 
         window.showDialog = (title, msg, type = 'alert', onOk = null) => {
             const overlay = document.getElementById('dialog-overlay');
@@ -175,8 +165,11 @@
             document.getElementById('dialog-msg').innerText = msg;
             const input = document.getElementById('dialog-input');
             const cancelBtn = document.getElementById('dialog-cancel');
-            if (type === 'prompt') {
-                input.value = ''; // 清空上次的輸入
+            
+            if (type.startsWith('prompt')) {
+                input.value = ''; 
+                // 區分是一般輸入框還是密碼框
+                input.type = type === 'prompt-password' ? 'password' : 'text'; 
                 input.classList.remove('hidden'); cancelBtn.classList.remove('hidden');
                 setTimeout(() => input.focus(), 100);
             } else if (type === 'confirm') {
@@ -184,63 +177,99 @@
             } else {
                 input.classList.add('hidden'); cancelBtn.classList.add('hidden');
             }
+            
             document.getElementById('dialog-ok').onclick = () => {
                 overlay.classList.replace('flex', 'hidden');
-                if (onOk) onOk(type === 'prompt' ? input.value : true);
+                if (onOk) onOk(type.startsWith('prompt') ? input.value : true);
             };
             cancelBtn.onclick = () => {
                 overlay.classList.replace('flex', 'hidden');
-                if (onOk) onOk(false); // 取消時傳回 false
+                if (onOk) onOk(false);
             };
         };
 
-        // --- 核心邏輯 ---
-        
-        // 【新增功能】刪除餐廳
-        window.deleteRestaurant = async () => {
-            const rList = Object.keys(window.sharedState.restaurants);
-            const r = window.sharedState.currentRestaurant;
-            
-            if (rList.length <= 1) {
-                return window.showDialog("提示", "系統必須保留至少一間餐廳，無法刪除！", "alert");
-            }
+        // --- 稽核日誌功能 ---
+        window.logAudit = (action, details) => {
+            if(!window.dailyState.auditLogs) window.dailyState.auditLogs = [];
+            const d = new Date();
+            const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+            window.dailyState.auditLogs.unshift({ time: timeStr, action, details });
+        };
 
-            window.showDialog("刪除餐廳", `確定要刪除「${r}」嗎？\n此操作將會清空該餐廳的所有菜單與加配選項。`, "confirm", async (res) => {
+        window.viewAuditLogs = () => {
+            // 使用 prompt-password
+            window.showDialog("系統日誌", "請輸入管理員密碼：", "prompt-password", (pwd) => {
+                if (pwd === "admin888") {
+                    const logs = window.dailyState.auditLogs || [];
+                    if (logs.length === 0) return window.showToast("今日尚無任何操作日誌");
+                    
+                    const logHtml = logs.map(l => `
+                        <div class="border-b border-slate-100 py-3">
+                            <div class="text-[10px] text-slate-400 font-bold mb-0.5">${l.time}</div>
+                            <div class="text-sm font-black ${l.action.includes('⚠️') ? 'text-red-500' : 'text-slate-700'}">${l.action}</div>
+                            <div class="text-xs text-slate-500 mt-0.5">${l.details}</div>
+                        </div>
+                    `).join('');
+                    
+                    document.getElementById('audit-log-content').innerHTML = logHtml;
+                    document.getElementById('audit-log-modal').classList.replace('hidden', 'flex');
+                } else if (pwd !== false) {
+                    window.showToast("密碼錯誤，拒絕存取", true);
+                }
+            });
+        };
+
+        // --- 核心邏輯 ---
+        window.deleteRestaurant = async () => {
+            const rList = Object.keys(window.sharedState.restaurants); const r = window.sharedState.currentRestaurant;
+            if (rList.length <= 1) return window.showDialog("提示", "系統必須保留至少一間餐廳，無法刪除！", "alert");
+            window.showDialog("刪除餐廳", `確定要刪除「${r}」嗎？\n此操作將會清空該餐廳的所有菜單。`, "confirm", async (res) => {
                 if (res) {
                     delete window.sharedState.restaurants[r];
-                    // 自動切換到列表中的第一個餐廳
                     window.sharedState.currentRestaurant = Object.keys(window.sharedState.restaurants)[0];
                     window.renderAll();
-                    try { 
-                        await window.syncShared(); 
-                        window.showToast("🗑️ 已成功刪除餐廳");
-                    } catch(e) { 
-                        window.showToast("同步失敗: 請檢查 Firebase 權限", true); 
-                    }
+                    try { await window.syncShared(); window.showToast("🗑️ 已成功刪除餐廳"); } catch(e) {}
                 }
             });
         };
 
         window.addItem = async () => {
-            if(window.dailyState.isLocked) return window.showDialog("提示", "帳單已鎖定，無法修改菜單");
-            const nameEl = document.getElementById('f-name');
-            const priceEl = document.getElementById('f-price');
-            const name = nameEl.value.trim();
-            const price = parseFloat(priceEl.value);
+            const nameEl = document.getElementById('f-name'); const priceEl = document.getElementById('f-price');
+            const name = nameEl.value.trim(); const price = parseFloat(priceEl.value);
             if (!name || isNaN(price)) return window.showDialog("提示", "請輸入名稱及價錢");
             
             const r = window.sharedState.currentRestaurant;
             if (!window.sharedState.restaurants[r]) window.sharedState.restaurants[r] = { menu: [], sideOptions: [] };
             window.sharedState.restaurants[r].menu.unshift({ name, price });
             
-            nameEl.value = ''; priceEl.value = '';
-            
-            window.renderAll(); 
-            try { 
-                await window.syncShared(); 
-            } catch(e) { 
-                window.showToast("同步失敗: 請檢查 Firebase 權限", true); 
-            }
+            nameEl.value = ''; priceEl.value = ''; window.renderAll(); 
+            try { await window.syncShared(); } catch(e) {}
+        };
+
+        window.openEditItemModal = (idx) => {
+            window.editItemIdx = idx;
+            const item = window.sharedState.restaurants[window.sharedState.currentRestaurant].menu[idx];
+            document.getElementById('edit-item-name').value = item.name;
+            document.getElementById('edit-item-price').value = item.price;
+            document.getElementById('edit-item-modal').classList.replace('hidden', 'flex');
+        };
+
+        window.saveEditItem = async () => {
+            const newName = document.getElementById('edit-item-name').value.trim(); const newPrice = parseFloat(document.getElementById('edit-item-price').value);
+            if (!newName || isNaN(newPrice)) return window.showToast("名稱與價錢不能為空", true);
+            window.sharedState.restaurants[window.sharedState.currentRestaurant].menu[window.editItemIdx] = { name: newName, price: newPrice };
+            document.getElementById('edit-item-modal').classList.replace('flex', 'hidden'); window.renderAll();
+            try { await window.syncShared(); } catch(e) {}
+        };
+
+        window.deleteEditItem = async () => {
+            window.showDialog("刪除餐點", "確定要從菜單中移除這個餐點嗎？", "confirm", async (res) => {
+                if (res) {
+                    window.sharedState.restaurants[window.sharedState.currentRestaurant].menu.splice(window.editItemIdx, 1);
+                    document.getElementById('edit-item-modal').classList.replace('flex', 'hidden'); window.renderAll();
+                    try { await window.syncShared(); } catch(e) {}
+                }
+            });
         };
 
         window.openModal = (idx) => {
@@ -262,99 +291,103 @@
             const r = window.sharedState.currentRestaurant;
             const item = window.sharedState.restaurants[r].menu[window.activeItemIdx];
             const sidePicks = document.querySelectorAll('input[name="m-side-pick"]:checked');
-            let total = item.price;
-            let details = [];
+            let total = item.price; let details = [];
             
             sidePicks.forEach(cb => {
                 const side = window.sharedState.restaurants[r].sideOptions[cb.value];
-                total += side.price;
-                details.push(side.name);
+                total += side.price; details.push(side.name);
             });
             const note = document.getElementById('m-note').value.trim();
             if (note) details.push(note);
             
             if(!window.dailyState.orders) window.dailyState.orders = [];
             window.dailyState.orders.push({ 
-                id: Date.now().toString(), 
-                user: userEl.value.trim(), 
-                item: item.name, 
-                total, 
-                details: details.join(', '), 
-                paid: false 
+                id: Date.now().toString(), user: userEl.value.trim(), restaurant: r, item: item.name, total, details: details.join(', '), paid: false 
             });
             
             localStorage.setItem('last_user_name', userEl.value.trim());
             document.getElementById('modal-overlay').classList.replace('flex', 'hidden');
-            
-            window.renderAll();
-            window.showToast("✅ 落單成功！");
-
-            try { 
-                await window.syncDaily(); 
-            } catch(e) { 
-                window.showToast("雲端同步失敗: 請檢查 Firebase 權限", true); 
-            }
+            window.renderAll(); window.showToast("✅ 落單成功！");
+            try { await window.syncDaily(); } catch(e) {}
         };
 
         window.deleteOrder = (id) => {
             if(window.dailyState.isLocked) return;
+            const orderToDel = window.dailyState.orders.find(o => o.id === id);
             window.showDialog("刪除", "確定刪除嗎？", "confirm", async (r) => { 
                 if(r){ 
                     window.dailyState.orders = window.dailyState.orders.filter(o=>o.id!==id); 
+                    
+                    // 記錄可疑刪除行為
+                    if(window.dailyState.hasBeenLocked && orderToDel) {
+                        window.logAudit('⚠️ 刪除訂單', `鎖定後被刪除: ${orderToDel.user} 的 ${orderToDel.item}`);
+                    }
+
                     window.renderAll();
-                    try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
+                    try { await window.syncDaily(); } catch(e) {}
                 }
             });
         };
 
         window.togglePaid = async (id) => { 
             const o = window.dailyState.orders.find(x=>x.id===id); 
-            if(o){ 
-                o.paid = !o.paid; 
-                window.renderAll();
-                try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
-            } 
+            if(o){ o.paid = !o.paid; window.renderAll(); try { await window.syncDaily(); } catch(e) {} } 
         };
 
         window.toggleUserPaid = async (username, isPaid) => {
             if(!window.dailyState.orders) return;
-            window.dailyState.orders.forEach(o => {
-                if(o.user === username) o.paid = isPaid;
-            });
+            window.dailyState.orders.forEach(o => { if(o.user === username) o.paid = isPaid; });
             window.renderAll();
-            try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
+            try { await window.syncDaily(); } catch(e) {}
         };
 
         window.setOverride = async (username, val) => {
             if(window.dailyState.isLocked) return;
             if(!window.dailyState.overrides) window.dailyState.overrides = {};
             
-            if (val.trim() === "" || isNaN(parseFloat(val))) {
-                delete window.dailyState.overrides[username];
-            } else {
-                window.dailyState.overrides[username] = parseFloat(val);
+            let actionDesc = "";
+            if (val.trim() === "" || isNaN(parseFloat(val))) { 
+                delete window.dailyState.overrides[username]; 
+                actionDesc = `移除了 ${username} 的手動金額`;
+            } else { 
+                window.dailyState.overrides[username] = parseFloat(val); 
+                actionDesc = `修改了 ${username} 的實付金額為 $${val}`;
             }
+
+            // 記錄可疑修改行為
+            if(window.dailyState.hasBeenLocked) {
+                window.logAudit('⚠️ 修改金額', `鎖定後: ${actionDesc}`);
+            }
+
             window.renderAll();
-            try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
+            try { await window.syncDaily(); } catch(e) {}
         };
 
         window.openVerifyModal = () => {
             const finalTotal = document.getElementById('total-txt').innerText;
             window.showDialog("核實帳單", `總實付額為 ${finalTotal}。\n確定要鎖定帳單嗎？`, "confirm", async (res) => {
-                if(res) {
-                    window.dailyState.isLocked = true;
-                    window.renderAll();
-                    try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
+                if(res) { 
+                    window.dailyState.isLocked = true; 
+                    window.dailyState.hasBeenLocked = true; // 標記為曾經鎖定過
+                    window.logAudit('✅ 帳單鎖定', `當下總額: ${finalTotal}`);
+                    window.renderAll(); 
+                    try { await window.syncDaily(); } catch(e) {} 
                 }
             });
         };
 
         window.unlockDaily = async () => {
             window.showDialog("解除鎖定", "解鎖後可再次編輯訂單與金額，確定嗎？", "confirm", async (res) => {
-                if(res) {
-                    window.dailyState.isLocked = false;
-                    window.renderAll();
-                    try { await window.syncDaily(); } catch(e) { window.showToast("同步失敗", true); }
+                if(res) { 
+                    window.dailyState.isLocked = false; 
+                    
+                    // 記錄可疑解鎖行為
+                    if(window.dailyState.hasBeenLocked) {
+                        window.logAudit('⚠️ 帳單解鎖', '有人手動解除了帳單鎖定');
+                    }
+
+                    window.renderAll(); 
+                    try { await window.syncDaily(); } catch(e) {} 
                 }
             });
         };
@@ -363,52 +396,66 @@
             const parts = window.currentDate.split('-');
             const formattedDate = parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : window.currentDate;
             const msg = `於${formattedDate}的帳單已核實，請到平台確認及付款`;
-            const encodedUrl = `https://wa.me/?text=${encodeURIComponent(msg)}`;
-            window.open(encodedUrl, '_blank');
+            window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+        };
+
+        window.clearAllData = () => {
+            // 使用 prompt-password
+            window.showDialog("⚠️ 清空資料", "請輸入管理員密碼：", "prompt-password", async (pwd) => {
+                if (pwd === "admin888") {
+                    window.showDialog("最後警告", "即將刪除所有歷史訂單及餐廳菜單設定！此操作不可逆！\n您確定要清空嗎？", "confirm", async (res) => {
+                        if (res) {
+                            if (!db) return window.showToast("離線狀態，無法刪除", true);
+                            window.showToast("資料清除中...");
+                            try {
+                                const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'daily'));
+                                const deletePromises = [];
+                                snap.forEach(docSnap => deletePromises.push(deleteDoc(docSnap.ref)));
+                                await Promise.all(deletePromises);
+
+                                window.sharedState = { restaurants: { "預設餐廳": { menu: [], sideOptions: [] } }, currentRestaurant: "預設餐廳" };
+                                await window.syncShared();
+
+                                window.currentDate = getTodayDate(); document.getElementById('global-date').value = window.currentDate;
+                                window.dailyState = { orders: [], extraCharge: 0, discount: 1, overrides: {}, isLocked: false, hasBeenLocked: false, auditLogs: [] };
+                                await window.syncDaily();
+
+                                window.renderAll(); window.showTab('menu'); window.showToast("✅ 所有資料已成功清空！");
+                            } catch (e) { window.showToast("清空資料失敗", true); }
+                        }
+                    });
+                } else if (pwd !== false) {
+                    window.showToast("密碼錯誤，拒絕操作", true);
+                }
+            });
         };
 
         window.calcTotals = (data) => {
-            const orders = data.orders || [];
-            const extra = data.extraCharge || 0;
-            const discInput = data.discount || 1;
-            const overrides = data.overrides || {};
-
+            const orders = data.orders || []; const extra = data.extraCharge || 0;
+            const discInput = data.discount || 1; const overrides = data.overrides || {};
             const groups = {};
             orders.forEach(o => {
                 if(!groups[o.user]) groups[o.user] = { subtotal: 0, items: [], fullyPaid: true };
-                groups[o.user].subtotal += o.total;
-                groups[o.user].items.push(o);
+                groups[o.user].subtotal += o.total; groups[o.user].items.push(o);
                 if(!o.paid) groups[o.user].fullyPaid = false;
             });
 
-            const rawOrdersTotal = orders.reduce((a,b)=>a+b.total, 0);
-            const userCount = Object.keys(groups).length;
-
+            const rawOrdersTotal = orders.reduce((a,b)=>a+b.total, 0); const userCount = Object.keys(groups).length;
             const totalBeforeDiscount = rawOrdersTotal + extra;
             let totalSavings = 0;
-            if (discInput > 0 && discInput <= 1) {
-                totalSavings = totalBeforeDiscount - (totalBeforeDiscount * discInput);
-            } else {
-                totalSavings = Math.abs(discInput === 1 ? 0 : discInput);
-            }
+            if (discInput > 0 && discInput <= 1) totalSavings = totalBeforeDiscount - (totalBeforeDiscount * discInput); 
+            else totalSavings = Math.abs(discInput === 1 ? 0 : discInput);
 
             const avgExtra = userCount > 0 ? (extra / userCount) : 0;
             const avgDiscountAmount = userCount > 0 ? (totalSavings / userCount) : 0;
 
-            let overallFinalAdjustedTotal = 0;
-            let overallUnpaid = 0;
-
+            let overallFinalAdjustedTotal = 0; let overallUnpaid = 0;
             Object.entries(groups).forEach(([name, d]) => {
                 const calcFinal = d.subtotal + avgExtra - avgDiscountAmount;
                 const hasOverride = overrides[name] !== undefined;
                 const userFinal = hasOverride ? overrides[name] : Math.max(0, calcFinal);
-
-                groups[name].userFinal = userFinal;
-                groups[name].calcFinal = calcFinal;
-                groups[name].hasOverride = hasOverride;
-
-                overallFinalAdjustedTotal += userFinal;
-                if (!d.fullyPaid) overallUnpaid += userFinal;
+                groups[name].userFinal = userFinal; groups[name].calcFinal = calcFinal; groups[name].hasOverride = hasOverride;
+                overallFinalAdjustedTotal += userFinal; if (!d.fullyPaid) overallUnpaid += userFinal;
             });
 
             return { groups, overallFinalAdjustedTotal, overallUnpaid };
@@ -417,78 +464,38 @@
         window.loadReport = async () => {
             const rc = document.getElementById('report-container');
             rc.innerHTML = '<div class="text-center py-10 text-slate-400 font-bold animate-pulse">掃描帳單中...</div>';
-            
-            if(!db) {
-                rc.innerHTML = '<div class="text-center py-10 text-red-400 font-bold">目前處於離線或無權限模式，無法讀取報告</div>';
-                return;
-            }
-
+            if(!db) { rc.innerHTML = '<div class="text-center py-10 text-red-400 font-bold">離線模式，無法讀取報告</div>'; return; }
             try {
-                const dailyRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily');
-                const snap = await getDocs(dailyRef);
+                const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'daily'));
                 const unpaidDays = [];
-
                 snap.forEach(docSnap => {
-                    const date = docSnap.id;
-                    const data = docSnap.data();
+                    const date = docSnap.id; const data = docSnap.data();
                     if (!data.orders || data.orders.length === 0) return;
-
                     const { groups, overallUnpaid } = window.calcTotals(data);
-                    
                     if (overallUnpaid > 0) {
-                        const unpaidUsers = Object.entries(groups)
-                            .filter(([_, d]) => !d.fullyPaid && d.userFinal > 0)
-                            .map(([name, d]) => ({ name, owe: d.userFinal }));
-                            
-                        if (unpaidUsers.length > 0) {
-                            unpaidDays.push({ date, overallUnpaid, unpaidUsers });
-                        }
+                        const unpaidUsers = Object.entries(groups).filter(([_, d]) => !d.fullyPaid && d.userFinal > 0).map(([name, d]) => ({ name, owe: d.userFinal }));
+                        if (unpaidUsers.length > 0) unpaidDays.push({ date, overallUnpaid, unpaidUsers });
                     }
                 });
 
                 unpaidDays.sort((a, b) => b.date.localeCompare(a.date));
-
                 if (unpaidDays.length === 0) {
-                    rc.innerHTML = `
-                        <div class="bg-emerald-50 border border-emerald-100 p-8 rounded-2xl text-center shadow-sm mt-4">
-                            <div class="text-4xl mb-3">🎉</div>
-                            <h3 class="text-emerald-600 font-black text-lg mb-1">所有帳單已收齊！</h3>
-                            <p class="text-emerald-500/70 text-xs font-bold">目前沒有任何欠款紀錄</p>
-                        </div>`;
+                    rc.innerHTML = `<div class="bg-emerald-50 border border-emerald-100 p-8 rounded-2xl text-center shadow-sm mt-4"><div class="text-4xl mb-3">🎉</div><h3 class="text-emerald-600 font-black text-lg mb-1">所有帳單已收齊！</h3></div>`;
                     return;
                 }
 
                 let totalOwedAcrossDays = unpaidDays.reduce((sum, d) => sum + d.overallUnpaid, 0);
-
                 rc.innerHTML = `
                     <div class="mb-4 bg-red-50 p-4 rounded-xl border border-red-100 flex justify-between items-center shadow-sm">
-                        <span class="font-black text-red-800">總未收金額</span>
-                        <span class="font-black text-red-600 text-xl">$${totalOwedAcrossDays.toFixed(1)}</span>
+                        <span class="font-black text-red-800">總未收金額</span><span class="font-black text-red-600 text-xl">$${totalOwedAcrossDays.toFixed(1)}</span>
                     </div>
                     ${unpaidDays.map(day => `
                     <div class="p-4 rounded-xl border mb-3 bg-white shadow-sm border-slate-200">
-                        <div class="flex justify-between items-center mb-3 pb-2 border-b border-slate-100">
-                            <span class="font-black text-slate-800 flex items-center gap-2">
-                                📅 ${day.date}
-                            </span>
-                            <span class="font-black text-red-500 text-sm bg-red-50 px-2 py-0.5 rounded">欠 $${day.overallUnpaid.toFixed(1)}</span>
-                        </div>
-                        <div class="space-y-2 mb-4">
-                            ${day.unpaidUsers.map(u => `
-                                <div class="flex justify-between items-center text-sm px-1">
-                                    <span class="text-slate-600 font-bold">${u.name}</span>
-                                    <span class="text-slate-500 font-black">$${u.owe.toFixed(1)}</span>
-                                </div>
-                            `).join('')}
-                        </div>
+                        <div class="flex justify-between items-center mb-3 pb-2 border-b border-slate-100"><span class="font-black text-slate-800">📅 ${day.date}</span><span class="font-black text-red-500 text-sm bg-red-50 px-2 py-0.5 rounded">欠 $${day.overallUnpaid.toFixed(1)}</span></div>
+                        <div class="space-y-2 mb-4">${day.unpaidUsers.map(u => `<div class="flex justify-between items-center text-sm px-1"><span class="text-slate-600 font-bold">${u.name}</span><span class="text-slate-500 font-black">$${u.owe.toFixed(1)}</span></div>`).join('')}</div>
                         <button onclick="window.jumpToDate('${day.date}')" class="w-full py-3 bg-slate-100 text-slate-600 rounded-lg text-sm font-black active:bg-slate-200 transition-colors">前往該日處理 ➔</button>
-                    </div>
-                `).join('')}`;
-
-            } catch(e) {
-                console.error(e);
-                rc.innerHTML = '<div class="text-center py-10 text-red-400 font-bold">讀取報告失敗，請檢查網路或權限</div>';
-            }
+                    </div>`).join('')}`;
+            } catch(e) { rc.innerHTML = '<div class="text-center py-10 text-red-400 font-bold">讀取報告失敗</div>'; }
         };
 
         window.renderAll = () => {
@@ -497,142 +504,94 @@
             const isLockedState = isLocked === true;
 
             const lockBadge = document.getElementById('lock-badge');
-            if (isLockedState) {
-                lockBadge.classList.remove('hidden');
-                document.getElementById('form-add-item').classList.add('opacity-50', 'pointer-events-none');
-            } else {
-                lockBadge.classList.add('hidden');
-                document.getElementById('form-add-item').classList.remove('opacity-50', 'pointer-events-none');
-            }
+            if (isLockedState) lockBadge.classList.remove('hidden'); else lockBadge.classList.add('hidden');
 
             const restSel = document.getElementById('rest-sel');
             restSel.innerHTML = Object.keys(restaurants).map(r => `<option value="${r}" ${r===currentRestaurant?'selected':''}>${r}</option>`).join('');
             
             const items = restaurants[currentRestaurant]?.menu || [];
+            
             document.getElementById('menu-list').innerHTML = items.map((it, idx) => `
-                <div class="flex items-center justify-between p-3.5 bg-white rounded-xl mb-2 shadow-sm border border-slate-200 ${isLockedState ? 'opacity-70' : 'active:bg-orange-50'}" onclick="window.openModal(${idx})">
+                <div class="flex items-center justify-between p-3.5 bg-white rounded-xl mb-2 shadow-sm border border-slate-200 transition-colors cursor-pointer hover:bg-orange-50/50" onclick="window.openModal(${idx})">
                     <div class="flex-1 min-w-0 mr-2">
                         <div class="font-bold text-slate-800 text-base truncate">${it.name}</div>
                         <div class="text-orange-500 font-bold text-sm">$${it.price}</div>
                     </div>
-                    <div class="w-8 h-8 bg-orange-100 text-orange-600 rounded-lg flex items-center justify-center font-black ${isLockedState ? 'hidden' : ''}">＋</div>
+                    <div class="flex gap-1.5 shrink-0">
+                        <button class="w-8 h-8 bg-slate-100 text-slate-500 rounded-lg flex items-center justify-center font-black active:bg-slate-200" onclick="event.stopPropagation(); window.openEditItemModal(${idx})">✏️</button>
+                        <button class="w-8 h-8 bg-orange-100 text-orange-600 rounded-lg flex items-center justify-center font-black ${isLockedState ? 'hidden' : 'active:bg-orange-200'}" onclick="event.stopPropagation(); window.openModal(${idx})">＋</button>
+                    </div>
                 </div>
             `).join('') || '<div class="text-center py-10 text-slate-400 text-sm">暫無餐點</div>';
 
-            const tallyItems = {};
+            const tallyGroups = {};
             (orders || []).forEach(o => { 
-                if (!tallyItems[o.item]) tallyItems[o.item] = { total: 0, details: {} };
-                tallyItems[o.item].total += 1;
+                const restName = o.restaurant || '預設餐廳';
+                if (!tallyGroups[restName]) tallyGroups[restName] = {};
+                if (!tallyGroups[restName][o.item]) tallyGroups[restName][o.item] = { total: 0, details: {} };
+                
+                tallyGroups[restName][o.item].total += 1;
                 const detailKey = o.details ? o.details : '標準 (無加配/備註)';
-                tallyItems[o.item].details[detailKey] = (tallyItems[o.item].details[detailKey] || 0) + 1;
+                tallyGroups[restName][o.item].details[detailKey] = (tallyGroups[restName][o.item].details[detailKey] || 0) + 1;
             });
 
-            document.getElementById('tally-list').innerHTML = Object.entries(tallyItems).map(([mainItem, data]) => `
-                <div class="mb-3 border border-orange-100 rounded-lg overflow-hidden bg-white shadow-sm">
-                    <div class="bg-orange-50 p-2.5 flex justify-between items-center border-b border-orange-100">
-                        <span class="font-black text-slate-800">${mainItem}</span>
-                        <span class="bg-orange-500 text-white px-2.5 py-0.5 rounded-full font-black text-xs">共 ${data.total} 份</span>
+            document.getElementById('tally-list').innerHTML = Object.entries(tallyGroups).map(([restName, itemsData]) => {
+                const itemsHtml = Object.entries(itemsData).map(([mainItem, data]) => `
+                    <div class="mb-3 border border-orange-100 rounded-lg overflow-hidden bg-white shadow-sm">
+                        <div class="bg-orange-50 p-2.5 flex justify-between items-center border-b border-orange-100"><span class="font-black text-slate-800">${mainItem}</span><span class="bg-orange-500 text-white px-2.5 py-0.5 rounded-full font-black text-xs">共 ${data.total} 份</span></div>
+                        <div class="p-2 space-y-1.5">
+                            ${Object.entries(data.details).map(([det, count]) => `<div class="flex justify-between items-start text-sm pl-2 pr-1"><div class="text-slate-600 font-medium relative before:content-[''] before:w-1.5 before:h-1.5 before:bg-orange-300 before:absolute before:left-0 before:top-1.5 before:rounded-full pl-3.5 flex-1 pr-2 leading-tight">${det}</div><span class="text-slate-500 font-bold text-xs shrink-0 pt-0.5">x ${count}</span></div>`).join('')}
+                        </div>
                     </div>
-                    <div class="p-2 space-y-1.5">
-                        ${Object.entries(data.details).map(([det, count]) => `
-                            <div class="flex justify-between items-start text-sm pl-2 pr-1">
-                                <div class="text-slate-600 font-medium relative before:content-[''] before:w-1.5 before:h-1.5 before:bg-orange-300 before:absolute before:left-0 before:top-1.5 before:rounded-full pl-3.5 flex-1 pr-2 leading-tight">
-                                    ${det}
-                                </div>
-                                <span class="text-slate-500 font-bold text-xs shrink-0 pt-0.5">x ${count}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            `).join('') || '<p class="text-slate-400 text-xs text-center py-4">暫無資料</p>';
+                `).join('');
 
-            document.getElementById('inp-extra').value = extraCharge || 0;
-            document.getElementById('inp-disc').value = discount || 1;
-            document.getElementById('inp-extra').disabled = isLockedState;
-            document.getElementById('inp-disc').disabled = isLockedState;
+                return `
+                    <div class="mb-4">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="bg-slate-700 text-white text-[11px] px-2.5 py-1 rounded-md font-black tracking-widest">${restName}</span>
+                        </div>
+                        ${itemsHtml}
+                    </div>
+                `;
+            }).join('') || '<p class="text-slate-400 text-xs text-center py-4">暫無資料</p>';
+
+            document.getElementById('inp-extra').value = extraCharge || 0; document.getElementById('inp-disc').value = discount || 1;
+            document.getElementById('inp-extra').disabled = isLockedState; document.getElementById('inp-disc').disabled = isLockedState;
 
             const { groups, overallFinalAdjustedTotal } = window.calcTotals(window.dailyState);
 
             document.getElementById('pay-list').innerHTML = Object.entries(groups).map(([name, data]) => {
                 const { userFinal, calcFinal, hasOverride, fullyPaid } = data;
-                
                 return `
                 <div class="p-3.5 rounded-xl border mb-3 bg-white shadow-sm border-slate-200 transition-colors ${fullyPaid ? 'bg-emerald-50/30 border-emerald-200' : ''}">
                     <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-100">
-                        <div class="flex items-center gap-2">
-                            <span class="font-black text-slate-800 text-lg">${name}</span>
-                            ${fullyPaid 
-                                ? `<span class="bg-emerald-100 text-emerald-700 text-[10px] px-2 py-0.5 rounded font-black border border-emerald-200 shadow-sm flex items-center gap-1">✅ 已付清</span>` 
-                                : `<button onclick="window.toggleUserPaid('${name}', true)" class="bg-orange-100 text-orange-600 text-[10px] px-2 py-0.5 rounded font-black border border-orange-200 active:bg-orange-200 shadow-sm transition-colors">一鍵收齊</button>`
-                            }
-                        </div>
-                        <div class="text-right">
-                            <span class="font-black ${fullyPaid ? 'text-emerald-500' : 'text-slate-800'} text-lg">$${userFinal.toFixed(1)}</span>
-                            <div class="text-[10px] text-slate-400">系統原計: $${calcFinal.toFixed(1)}</div>
-                        </div>
+                        <div class="flex items-center gap-2"><span class="font-black text-slate-800 text-lg">${name}</span>${fullyPaid ? `<span class="bg-emerald-100 text-emerald-700 text-[10px] px-2 py-0.5 rounded font-black border border-emerald-200 shadow-sm flex items-center gap-1">✅ 已付清</span>` : `<button onclick="window.toggleUserPaid('${name}', true)" class="bg-orange-100 text-orange-600 text-[10px] px-2 py-0.5 rounded font-black border border-orange-200 active:bg-orange-200 shadow-sm transition-colors">一鍵收齊</button>`}</div>
+                        <div class="text-right"><span class="font-black ${fullyPaid ? 'text-emerald-500' : 'text-slate-800'} text-lg">$${userFinal.toFixed(1)}</span><div class="text-[10px] text-slate-400">系統原計: $${calcFinal.toFixed(1)}</div></div>
                     </div>
-                    ${data.items.map(i => `
-                        <div class="flex items-center gap-2 text-xs mb-1.5 pl-1">
-                            <input type="checkbox" ${i.paid?'checked':''} onchange="window.togglePaid('${i.id}')" class="w-4 h-4 accent-emerald-500 cursor-pointer shadow-sm rounded">
-                            <span class="flex-1 font-medium ${i.paid ? 'text-slate-400 line-through' : 'text-slate-600'} truncate transition-all">${i.item} <span class="text-slate-400 opacity-80">${i.details ? '('+i.details+')' : ''}</span></span>
-                            ${!isLockedState ? `<button onclick="window.deleteOrder('${i.id}')" class="text-red-400 px-1 py-0.5 bg-red-50 rounded">刪</button>` : ''}
-                        </div>
-                    `).join('')}
-                    
-                    ${!isLockedState ? `
-                    <div class="mt-3 pt-3 border-t border-slate-50 flex items-center justify-between">
-                        <span class="text-[10px] font-bold text-slate-500">實付金額 (可點擊直接修改)</span>
-                        <div class="flex items-center gap-1">
-                            <span class="text-slate-400 font-bold text-sm">$</span>
-                            <input type="number" step="0.1" value="${hasOverride ? userFinal : ''}" placeholder="${calcFinal.toFixed(1)}" onchange="window.setOverride('${name}', this.value)" class="w-20 text-center bg-slate-50 border border-slate-200 rounded text-sm font-black outline-none py-1.5 focus:border-orange-400 focus:bg-white transition-colors placeholder:text-slate-300 placeholder:font-normal">
-                        </div>
-                    </div>` : `
-                    <div class="mt-2 text-right text-[10px] text-slate-400 font-bold">最終結算金額: $${userFinal.toFixed(1)} ${hasOverride ? '<span class="text-orange-400">(已手動更改)</span>' : ''}</div>
-                    `}
+                    ${data.items.map(i => `<div class="flex items-center gap-2 text-xs mb-1.5 pl-1"><input type="checkbox" ${i.paid?'checked':''} onchange="window.togglePaid('${i.id}')" class="w-4 h-4 accent-emerald-500 cursor-pointer shadow-sm rounded"><span class="flex-1 font-medium ${i.paid ? 'text-slate-400 line-through' : 'text-slate-600'} transition-all"><span class="text-[10px] font-bold bg-slate-100 text-slate-500 px-1 py-0.5 rounded mr-1">${i.restaurant || '預設'}</span>${i.item} <span class="text-slate-400 opacity-80">${i.details ? '('+i.details+')' : ''}</span></span>${!isLockedState ? `<button onclick="window.deleteOrder('${i.id}')" class="text-red-400 px-1 py-0.5 bg-red-50 rounded">刪</button>` : ''}</div>`).join('')}
+                    ${!isLockedState ? `<div class="mt-3 pt-3 border-t border-slate-50 flex items-center justify-between"><span class="text-[10px] font-bold text-slate-500">實付金額 (可修改)</span><div class="flex items-center gap-1"><span class="text-slate-400 font-bold text-sm">$</span><input type="number" step="0.1" value="${hasOverride ? userFinal : ''}" placeholder="${calcFinal.toFixed(1)}" onchange="window.setOverride('${name}', this.value)" class="w-20 text-center bg-slate-50 border border-slate-200 rounded text-sm font-black outline-none py-1.5 focus:border-orange-400 focus:bg-white transition-colors placeholder:text-slate-300 placeholder:font-normal"></div></div>` : `<div class="mt-2 text-right text-[10px] text-slate-400 font-bold">最終結算金額: $${userFinal.toFixed(1)} ${hasOverride ? '<span class="text-orange-400">(已手動更改)</span>' : ''}</div>`}
                 </div>`;
             }).join('') || '<div class="text-center py-10 text-slate-400 text-sm font-bold">當日無訂單</div>';
 
             document.getElementById('total-txt').innerText = `$${overallFinalAdjustedTotal.toFixed(1)}`;
-
             const actionArea = document.getElementById('action-area');
-            if (isLockedState) {
-                actionArea.innerHTML = `
-                    <div class="flex gap-2">
-                        <button onclick="window.unlockDaily()" class="flex-1 bg-slate-200 text-slate-700 py-3.5 rounded-xl font-black shadow-sm flex items-center justify-center gap-1 active:bg-slate-300 transition-colors">🔓 解除鎖定</button>
-                        <button onclick="window.sendWhatsApp()" class="flex-[2] bg-emerald-500 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-emerald-600 transition-colors">📱 發送 WhatsApp</button>
-                    </div>`;
-            } else {
-                actionArea.innerHTML = `
-                    <div class="flex gap-2">
-                        <button onclick="window.openVerifyModal()" class="flex-[2] bg-slate-800 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-slate-900 transition-colors">✅ 核實並鎖定</button>
-                        <button onclick="window.sendWhatsApp()" class="flex-1 bg-emerald-500 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-emerald-600 transition-colors">📱 WhatsApp</button>
-                    </div>`;
-            }
+            if (isLockedState) { actionArea.innerHTML = `<div class="flex gap-2"><button onclick="window.unlockDaily()" class="flex-1 bg-slate-200 text-slate-700 py-3.5 rounded-xl font-black shadow-sm flex items-center justify-center gap-1 active:bg-slate-300">🔓 解鎖</button><button onclick="window.sendWhatsApp()" class="flex-[2] bg-emerald-500 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-emerald-600">📱 WhatsApp</button></div>`; } 
+            else { actionArea.innerHTML = `<div class="flex gap-2"><button onclick="window.openVerifyModal()" class="flex-[2] bg-slate-800 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-slate-900">✅ 核實並鎖定</button><button onclick="window.sendWhatsApp()" class="flex-1 bg-emerald-500 text-white py-3.5 rounded-xl font-black shadow-md flex items-center justify-center gap-1 active:bg-emerald-600">📱 WhatsApp</button></div>`; }
         };
 
         window.renderModalSides = () => {
-            const { restaurants, currentRestaurant } = window.sharedState;
-            const sides = restaurants[currentRestaurant]?.sideOptions || [];
-            document.getElementById('m-sides-list').innerHTML = sides.map((s, i) => `
-                <label class="flex items-center justify-between p-2.5 bg-slate-50 rounded-lg border border-slate-200 has-[:checked]:bg-orange-50 has-[:checked]:border-orange-200 text-sm">
-                    <div class="flex items-center truncate mr-1"><input type="checkbox" name="m-side-pick" value="${i}" class="w-4 h-4 mr-2 shrink-0"><span class="font-bold truncate text-xs">${s.name}</span></div>
-                    <span class="text-orange-600 font-bold text-xs shrink-0">+$${s.price}</span>
-                </label>
-            `).join('');
+            const sides = window.sharedState.restaurants[window.sharedState.currentRestaurant]?.sideOptions || [];
+            document.getElementById('m-sides-list').innerHTML = sides.map((s, i) => `<label class="flex items-center justify-between p-2.5 bg-slate-50 rounded-lg border border-slate-200 has-[:checked]:bg-orange-50 has-[:checked]:border-orange-200 text-sm"><div class="flex items-center truncate mr-1"><input type="checkbox" name="m-side-pick" value="${i}" class="w-4 h-4 mr-2 shrink-0"><span class="font-bold truncate text-xs">${s.name}</span></div><span class="text-orange-600 font-bold text-xs shrink-0">+$${s.price}</span></label>`).join('');
         };
 
         window.addSideInModal = async () => {
-            const n = document.getElementById('m-side-name').value;
-            const p = parseFloat(document.getElementById('m-side-price').value) || 0;
+            const n = document.getElementById('m-side-name').value; const p = parseFloat(document.getElementById('m-side-price').value) || 0;
             if (n) {
                 const r = window.sharedState.currentRestaurant;
                 if (!window.sharedState.restaurants[r].sideOptions) window.sharedState.restaurants[r].sideOptions = [];
                 window.sharedState.restaurants[r].sideOptions.push({ name: n, price: p });
-                window.renderModalSides(); 
-                document.getElementById('m-side-name').value = ''; document.getElementById('m-side-price').value = '';
-                
-                try { await window.syncShared(); } 
-                catch(e) { window.showToast("同步失敗: 權限不足", true); }
+                window.renderModalSides(); document.getElementById('m-side-name').value = ''; document.getElementById('m-side-price').value = '';
+                try { await window.syncShared(); } catch(e) {}
             }
         };
 
@@ -645,17 +604,9 @@
             document.getElementById(`sec-${t}`).classList.remove('hidden');
             document.getElementById(`tab-${t}`).className = "py-3 font-black border-b-2 border-orange-500 text-orange-600 bg-orange-50/50 text-sm flex items-center justify-center gap-1 transition-colors";
             
-            if (t === 'pay') {
-                footer.classList.remove('hidden');
-                document.body.classList.add('has-footer');
-            } else {
-                footer.classList.add('hidden');
-                document.body.classList.remove('has-footer');
-            }
-
-            if (t === 'report') {
-                window.loadReport();
-            }
+            if (t === 'pay') { footer.classList.remove('hidden'); document.body.classList.add('has-footer'); } 
+            else { footer.classList.add('hidden'); document.body.classList.remove('has-footer'); }
+            if (t === 'report') window.loadReport();
         };
 
         initAuth();
@@ -674,11 +625,8 @@
         body.has-footer main { padding-bottom: 120px; }
         body:not(.has-footer) main { padding-bottom: 40px; }
         .animate-bounce-in { animation: bounceIn 0.5s ease; }
-        @keyframes bounceIn {
-            0% { transform: scale(0.8); opacity: 0; }
-            70% { transform: scale(1.05); }
-            100% { transform: scale(1); opacity: 1; }
-        }
+        @keyframes bounceIn { 0% { transform: scale(0.8); opacity: 0; } 70% { transform: scale(1.05); } 100% { transform: scale(1); opacity: 1; } }
+        input[type="date"]::-webkit-calendar-picker-indicator { cursor: pointer; filter: invert(1); }
         input[type="number"]::-webkit-inner-spin-button, 
         input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type="number"] { -moz-appearance: textfield; }
@@ -689,36 +637,30 @@
     <div id="global-toast" class="hidden"></div>
 
     <div class="fixed top-0 left-0 right-0 z-40 bg-white shadow-sm border-b border-slate-200">
-        <header class="flex justify-between items-center px-4 max-w-md mx-auto h-[54px] bg-slate-900 text-white">
-            <h1 class="text-base font-black tracking-tight flex items-center gap-2">
+        <header class="flex justify-between items-center px-3 max-w-md mx-auto h-[54px] bg-slate-900 text-white">
+            <h1 class="text-[15px] font-black tracking-tight flex items-center gap-1 shrink-0 mr-2">
                 🍱 外賣助手
-                <span id="lock-badge" class="hidden bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded shadow-inner">🔒 鎖定中</span>
+                <span id="lock-badge" class="hidden bg-red-500 text-white text-[9px] px-1.5 py-0.5 rounded shadow-inner ml-1">🔒</span>
             </h1>
-            <div class="flex items-center gap-2">
-                <input type="date" id="global-date" onchange="window.changeDate(this.value)" class="bg-slate-800 border border-slate-700 text-white px-2 py-1 rounded text-sm font-bold outline-none cursor-pointer">
+            <div class="flex items-center gap-1.5 shrink-0">
+                <button id="btn-prev-date" onclick="window.changeToActiveDate(-1)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-lg active:bg-slate-700 text-slate-300 transition-colors">◀</button>
+                <input type="date" id="global-date" onchange="window.changeDate(this.value)" class="bg-slate-800 border border-slate-700 text-white px-1 py-1.5 w-[140px] rounded-lg text-sm font-bold outline-none cursor-pointer text-center tracking-wider">
+                <button id="btn-next-date" onclick="window.changeToActiveDate(1)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-lg active:bg-slate-700 text-slate-300 transition-colors">▶</button>
             </div>
         </header>
         <nav class="grid grid-cols-3 max-w-md mx-auto">
-            <button onclick="window.showTab('menu')" id="tab-menu" class="py-3 font-black border-b-2 border-orange-500 text-orange-600 bg-orange-50/50 text-sm flex items-center justify-center gap-1 transition-colors">
-                <span>📝</span> 點餐
-            </button>
-            <button onclick="window.showTab('pay')" id="tab-pay" class="py-3 font-bold border-b-2 border-transparent text-slate-400 text-sm flex items-center justify-center gap-1 transition-colors">
-                <span>💰</span> 結帳
-            </button>
-            <button onclick="window.showTab('report')" id="tab-report" class="py-3 font-bold border-b-2 border-transparent text-slate-400 text-sm flex items-center justify-center gap-1 transition-colors">
-                <span>📊</span> 報告
-            </button>
+            <button onclick="window.showTab('menu')" id="tab-menu" class="py-3 font-black border-b-2 border-orange-500 text-orange-600 bg-orange-50/50 text-sm flex items-center justify-center gap-1 transition-colors"><span>📝</span> 點餐</button>
+            <button onclick="window.showTab('pay')" id="tab-pay" class="py-3 font-bold border-b-2 border-transparent text-slate-400 text-sm flex items-center justify-center gap-1 transition-colors"><span>💰</span> 結帳</button>
+            <button onclick="window.showTab('report')" id="tab-report" class="py-3 font-bold border-b-2 border-transparent text-slate-400 text-sm flex items-center justify-center gap-1 transition-colors"><span>📊</span> 報告</button>
         </nav>
     </div>
 
     <main class="pt-[110px] px-3 max-w-md mx-auto w-full box-border transition-all">
-        
         <section id="sec-menu" class="space-y-4">
-            <!-- 餐廳選擇與新增/刪除區塊更新 -->
             <div class="flex gap-1.5">
                 <select id="rest-sel" onchange="window.sharedState.currentRestaurant=this.value;window.renderAll();window.syncShared().catch(()=>{});" class="flex-1 min-w-0 bg-white px-2 py-2.5 rounded-xl shadow-sm border border-slate-300 font-bold text-sm outline-none"></select>
-                <button onclick="window.deleteRestaurant()" class="bg-red-50 text-red-500 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-red-200 transition-colors active:bg-red-100">刪除</button>
-                <button onclick="window.showDialog('新餐廳','輸入餐廳名稱','prompt',async (n)=>{if(n){window.sharedState.restaurants[n]={menu:[],sideOptions:[]};window.sharedState.currentRestaurant=n;window.renderAll();try{await window.syncShared();}catch(e){window.showToast('同步失敗',true);}}})" class="bg-slate-200 text-slate-800 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-slate-300 transition-colors active:bg-slate-300">＋ 餐廳</button>
+                <button onclick="window.deleteRestaurant()" class="bg-red-50 text-red-500 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-red-200 active:bg-red-100">刪除</button>
+                <button onclick="window.showDialog('新餐廳','輸入餐廳名稱','prompt',async (n)=>{if(n){window.sharedState.restaurants[n]={menu:[],sideOptions:[]};window.sharedState.currentRestaurant=n;window.renderAll();try{await window.syncShared();}catch(e){}}})" class="bg-slate-200 text-slate-800 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-slate-300 active:bg-slate-300">＋ 餐廳</button>
             </div>
             
             <div id="form-add-item" class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 transition-opacity">
@@ -726,91 +668,100 @@
                 <div class="flex gap-2">
                     <input type="text" id="f-name" placeholder="餐點名稱" class="flex-[2] min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold text-sm outline-none focus:border-orange-400">
                     <input type="number" id="f-price" placeholder="價錢 $" class="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold text-sm outline-none focus:border-orange-400">
-                    <button onclick="window.addItem()" class="w-14 shrink-0 bg-orange-500 text-white font-black rounded-lg text-xs shadow-sm active:bg-orange-600 transition-colors">新增</button>
+                    <button onclick="window.addItem()" class="w-14 shrink-0 bg-orange-500 text-white font-black rounded-lg text-xs shadow-sm active:bg-orange-600">新增</button>
                 </div>
             </div>
-
             <div id="menu-list" class="space-y-2 pb-6"></div>
         </section>
 
         <section id="sec-pay" class="hidden space-y-4">
-            
             <div class="grid grid-cols-2 gap-3">
-                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200">
-                    <label class="text-[10px] font-black text-slate-400 uppercase block mb-1">附加費 $ (均分)</label>
-                    <input type="number" id="inp-extra" onchange="window.dailyState.extraCharge=parseFloat(this.value)||0; window.renderAll(); window.syncDaily().catch(()=>{});" class="w-full bg-slate-50 p-2 rounded-lg font-black text-base outline-none">
-                </div>
-                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200">
-                    <label class="text-[10px] font-black text-slate-400 uppercase block mb-1">折扣 (平均平攤)</label>
-                    <input type="number" step="0.01" id="inp-disc" onchange="window.dailyState.discount=parseFloat(this.value)||1; window.renderAll(); window.syncDaily().catch(()=>{});" class="w-full bg-slate-50 p-2 rounded-lg font-black text-base outline-none text-orange-600">
-                </div>
+                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200"><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">附加費 $ (均分)</label><input type="number" id="inp-extra" onchange="window.dailyState.extraCharge=parseFloat(this.value)||0; window.renderAll(); window.syncDaily().catch(()=>{});" class="w-full bg-slate-50 p-2 rounded-lg font-black text-base outline-none"></div>
+                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200"><label class="text-[10px] font-black text-slate-400 uppercase block mb-1">折扣 (平均平攤)</label><input type="number" step="0.01" id="inp-disc" onchange="window.dailyState.discount=parseFloat(this.value)||1; window.renderAll(); window.syncDaily().catch(()=>{});" class="w-full bg-slate-50 p-2 rounded-lg font-black text-base outline-none text-orange-600"></div>
             </div>
-
-            <div class="bg-transparent">
-                <h3 class="font-black text-slate-800 text-sm mb-3 flex items-center pl-1">📋 落單數量總計</h3>
-                <div id="tally-list"></div>
-            </div>
-
+            <div class="bg-transparent"><h3 class="font-black text-slate-800 text-sm mb-3 flex items-center pl-1">📋 落單數量總計</h3><div id="tally-list"></div></div>
             <div id="pay-list"></div>
             <div id="action-area" class="pt-2 pb-6"></div>
-
         </section>
 
         <section id="sec-report" class="hidden pb-6">
-            <div class="mb-4 pt-1">
-                <h2 class="text-xl font-black text-slate-800 tracking-tight">欠款追蹤報告</h2>
-                <p class="text-xs text-slate-500 font-bold mt-1">系統會自動列出過往所有未收齊款項的帳單</p>
-            </div>
-            
+            <div class="mb-4 pt-1"><h2 class="text-xl font-black text-slate-800 tracking-tight">欠款追蹤報告</h2><p class="text-xs text-slate-500 font-bold mt-1">系統會自動列出過往所有未收齊款項的帳單</p></div>
             <div id="report-container"></div>
-        </section>
+            
+            <div class="mt-10 pt-6 border-t border-slate-200 px-2 space-y-3">
+                <!-- 稽核日誌按鈕 -->
+                <button onclick="window.viewAuditLogs()" class="w-full py-3.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-xl font-black text-sm active:bg-slate-200 transition-colors shadow-sm flex items-center justify-center gap-2">
+                    🕵️ 查看系統日誌 (管理員專用)
+                </button>
 
+                <!-- 清空系統資料按鈕 -->
+                <button onclick="window.clearAllData()" class="w-full py-3.5 bg-red-50 text-red-500 border border-red-200 rounded-xl font-black text-sm active:bg-red-100 transition-colors shadow-sm flex items-center justify-center gap-2">
+                    🗑️ 清空所有系統資料
+                </button>
+            </div>
+        </section>
     </main>
 
     <footer id="main-footer" class="hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 shadow-[0_-10px_20px_rgba(0,0,0,0.05)] safe-pb">
         <div class="max-w-md mx-auto p-3 px-4 flex justify-between items-center">
-            <div>
-                <span class="text-[10px] text-slate-500 font-bold block">該日實付總額</span>
-                <span id="total-txt" class="text-2xl font-black text-orange-500 leading-tight">$0</span>
-            </div>
-            <div class="text-right">
-                <p class="text-[10px] text-slate-400 bg-slate-100 px-2 py-1 rounded font-bold inline-block">含微調及平攤</p>
-            </div>
+            <div><span class="text-[10px] text-slate-500 font-bold block">該日實付總額</span><span id="total-txt" class="text-2xl font-black text-orange-500 leading-tight">$0</span></div>
+            <div class="text-right"><p class="text-[10px] text-slate-400 bg-slate-100 px-2 py-1 rounded font-bold inline-block">含微調及平攤</p></div>
         </div>
     </footer>
 
+    <!-- 新增訂單 Modal -->
     <div id="modal-overlay" class="hidden fixed inset-0 bg-black/70 z-50 items-end sm:items-center justify-center sm:p-4 backdrop-blur-sm">
         <div class="bg-white w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
             <div class="p-3 text-center border-b border-slate-100 flex justify-between items-center">
-                <div class="text-left">
-                    <h3 id="m-item-title" class="text-base font-black text-slate-800 leading-tight"></h3>
-                    <p id="m-item-price" class="text-orange-500 font-black text-sm"></p>
-                </div>
+                <div class="text-left"><h3 id="m-item-title" class="text-base font-black text-slate-800 leading-tight"></h3><p id="m-item-price" class="text-orange-500 font-black text-sm"></p></div>
                 <button onclick="document.getElementById('modal-overlay').classList.replace('flex', 'hidden')" class="w-8 h-8 bg-slate-100 rounded-full text-slate-500 font-bold text-sm flex items-center justify-center">✕</button>
             </div>
             <div class="flex-1 overflow-y-auto p-4 space-y-3">
-                <div class="flex items-center gap-2">
-                    <label class="font-black text-slate-500 text-xs shrink-0 w-12">姓名</label>
-                    <input type="text" id="m-user" placeholder="誰點的？" class="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
-                </div>
+                <div class="flex items-center gap-2"><label class="font-black text-slate-500 text-xs shrink-0 w-12">姓名</label><input type="text" id="m-user" placeholder="誰點的？" class="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-lg font-bold outline-none text-sm focus:border-orange-400"></div>
                 <div>
                     <label class="font-black text-slate-500 text-xs mb-1.5 block">加配項目 (副餐/飲品)</label>
                     <div id="m-sides-list" class="grid grid-cols-2 gap-2"></div>
-                    <div class="mt-2 p-2 bg-slate-50 border border-dashed border-slate-300 rounded-lg">
-                        <div class="flex gap-1.5">
-                            <input type="text" id="m-side-name" placeholder="新增選項" class="flex-[2] min-w-0 px-2 py-1.5 rounded bg-white border border-slate-200 font-bold text-xs outline-none focus:border-orange-300">
-                            <input type="number" id="m-side-price" placeholder="+$" class="flex-1 min-w-0 px-2 py-1.5 rounded bg-white border border-slate-200 font-bold text-xs outline-none focus:border-orange-300">
-                            <button onclick="window.addSideInModal()" class="bg-slate-800 text-white font-black px-2.5 rounded text-xs active:bg-slate-900 transition-colors">＋</button>
-                        </div>
-                    </div>
+                    <div class="mt-2 p-2 bg-slate-50 border border-dashed border-slate-300 rounded-lg"><div class="flex gap-1.5"><input type="text" id="m-side-name" placeholder="新增選項" class="flex-[2] min-w-0 px-2 py-1.5 rounded bg-white border border-slate-200 font-bold text-xs outline-none"><input type="number" id="m-side-price" placeholder="+$" class="flex-1 min-w-0 px-2 py-1.5 rounded bg-white border border-slate-200 font-bold text-xs outline-none"><button onclick="window.addSideInModal()" class="bg-slate-800 text-white font-black px-2.5 rounded text-xs active:bg-slate-900">＋</button></div></div>
                 </div>
-                <div class="flex items-center gap-2">
-                    <label class="font-black text-slate-500 text-xs shrink-0 w-12">備註</label>
-                    <input type="text" id="m-note" placeholder="如：少甜、走冰" class="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
+                <div class="flex items-center gap-2"><label class="font-black text-slate-500 text-xs shrink-0 w-12">備註</label><input type="text" id="m-note" placeholder="如：少甜、走冰" class="flex-1 bg-slate-50 border border-slate-200 p-2.5 rounded-lg font-bold outline-none text-sm focus:border-orange-400"></div>
+            </div>
+            <div class="p-3 border-t border-slate-100 bg-white safe-pb"><button onclick="window.confirmOrder()" class="w-full py-3 bg-orange-500 text-white font-black rounded-xl text-base shadow-md active:bg-orange-600">確認加入訂單</button></div>
+        </div>
+    </div>
+
+    <!-- 編輯餐點 Modal -->
+    <div id="edit-item-modal" class="hidden fixed inset-0 bg-black/70 z-50 items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div class="p-4 text-center border-b border-slate-100 bg-slate-50">
+                <h3 class="text-base font-black text-slate-800">編輯餐點</h3>
+            </div>
+            <div class="p-4 space-y-4">
+                <div>
+                    <label class="font-black text-slate-500 text-xs mb-1 block">名稱</label>
+                    <input type="text" id="edit-item-name" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
+                </div>
+                <div>
+                    <label class="font-black text-slate-500 text-xs mb-1 block">價錢 ($)</label>
+                    <input type="number" id="edit-item-price" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
                 </div>
             </div>
-            <div class="p-3 border-t border-slate-100 bg-white safe-pb">
-                <button onclick="window.confirmOrder()" class="w-full py-3 bg-orange-500 text-white font-black rounded-xl text-base shadow-md active:bg-orange-600 transition-colors">確認加入訂單</button>
+            <div class="p-3 border-t border-slate-100 bg-white flex gap-2">
+                <button onclick="window.deleteEditItem()" class="px-4 py-3 bg-red-50 text-red-500 font-black rounded-xl shadow-sm active:bg-red-100">刪除</button>
+                <button onclick="document.getElementById('edit-item-modal').classList.replace('flex', 'hidden')" class="flex-1 py-3 bg-slate-100 text-slate-600 font-black rounded-xl active:bg-slate-200">取消</button>
+                <button onclick="window.saveEditItem()" class="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl shadow-md active:bg-orange-600">儲存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 稽核日誌 Modal -->
+    <div id="audit-log-modal" class="hidden fixed inset-0 bg-black/70 z-[60] items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div class="p-4 text-center border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <h3 class="text-base font-black text-slate-800">🕵️ 系統操作日誌 (當日)</h3>
+                <button onclick="document.getElementById('audit-log-modal').classList.replace('flex', 'hidden')" class="w-8 h-8 bg-slate-200 rounded-full text-slate-600 font-bold text-sm flex items-center justify-center">✕</button>
+            </div>
+            <div id="audit-log-content" class="p-4 overflow-y-auto space-y-1">
+                <!-- Logs inject here -->
             </div>
         </div>
     </div>
@@ -821,8 +772,8 @@
             <p id="dialog-msg" class="text-slate-500 font-bold text-sm text-center whitespace-pre-line"></p>
             <input type="text" id="dialog-input" class="hidden w-full p-3 bg-slate-50 border border-slate-200 rounded-lg outline-none font-bold text-center focus:border-orange-400 focus:bg-white transition-colors">
             <div class="flex gap-2">
-                <button id="dialog-cancel" class="hidden flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl active:bg-slate-200 transition-colors">取消</button>
-                <button id="dialog-ok" class="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl shadow-md active:bg-orange-600 transition-colors">確定</button>
+                <button id="dialog-cancel" class="hidden flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl active:bg-slate-200">取消</button>
+                <button id="dialog-ok" class="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl shadow-md active:bg-orange-600">確定</button>
             </div>
         </div>
     </div>
