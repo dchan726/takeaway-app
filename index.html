@@ -37,7 +37,6 @@
             currentRestaurant: "預設餐廳"
         };
         
-        // 加入 auditLogs 與 hasBeenLocked
         window.dailyState = {
             orders: [], extraCharge: 0, discount: 1, overrides: {}, 
             isLocked: false, hasBeenLocked: false, auditLogs: []
@@ -168,7 +167,6 @@
             
             if (type.startsWith('prompt')) {
                 input.value = ''; 
-                // 區分是一般輸入框還是密碼框
                 input.type = type === 'prompt-password' ? 'password' : 'text'; 
                 input.classList.remove('hidden'); cancelBtn.classList.remove('hidden');
                 setTimeout(() => input.focus(), 100);
@@ -188,7 +186,6 @@
             };
         };
 
-        // --- 稽核日誌功能 ---
         window.logAudit = (action, details) => {
             if(!window.dailyState.auditLogs) window.dailyState.auditLogs = [];
             const d = new Date();
@@ -197,7 +194,6 @@
         };
 
         window.viewAuditLogs = () => {
-            // 使用 prompt-password
             window.showDialog("系統日誌", "請輸入管理員密碼：", "prompt-password", (pwd) => {
                 if (pwd === "admin888") {
                     const logs = window.dailyState.auditLogs || [];
@@ -214,12 +210,11 @@
                     document.getElementById('audit-log-content').innerHTML = logHtml;
                     document.getElementById('audit-log-modal').classList.replace('hidden', 'flex');
                 } else if (pwd !== false) {
-                    window.showToast("密碼錯誤，拒絕存取", true);
+                    window.showToast("密碼錯誤", true);
                 }
             });
         };
 
-        // --- 核心邏輯 ---
         window.deleteRestaurant = async () => {
             const rList = Object.keys(window.sharedState.restaurants); const r = window.sharedState.currentRestaurant;
             if (rList.length <= 1) return window.showDialog("提示", "系統必須保留至少一間餐廳，無法刪除！", "alert");
@@ -243,6 +238,142 @@
             window.sharedState.restaurants[r].menu.unshift({ name, price });
             
             nameEl.value = ''; priceEl.value = ''; window.renderAll(); 
+            try { await window.syncShared(); } catch(e) {}
+        };
+
+        // --- 智能匯入進階版功能 ---
+        window.openImportModal = () => {
+            document.getElementById('import-textarea').value = '';
+            document.getElementById('import-results').innerHTML = '';
+            document.getElementById('import-btn-confirm').classList.add('hidden');
+            document.getElementById('import-modal').classList.replace('hidden', 'flex');
+        };
+
+        window.toggleAllImport = (state) => {
+            document.querySelectorAll('.import-checkbox').forEach(cb => cb.checked = state);
+        };
+
+        window.analyzeImportText = () => {
+            const text = document.getElementById('import-textarea').value;
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+            const resultsContainer = document.getElementById('import-results');
+
+            if (lines.length === 0) {
+                resultsContainer.innerHTML = '<div class="text-center py-6 text-slate-400 font-bold text-sm">請先貼上文字。</div>';
+                document.getElementById('import-btn-confirm').classList.add('hidden');
+                return;
+            }
+
+            // 1. 極致精準：提取餐廳名稱
+            let detectedRestName = "";
+            const homeIdx = lines.findIndex(l => l.includes("主頁") || l.toLowerCase().includes("home"));
+            
+            if (homeIdx !== -1 && homeIdx + 1 < lines.length) {
+                detectedRestName = lines[homeIdx + 1];
+            } 
+            
+            // 備用方案：如果上面抓到的太長，或者找不到，就用正則過濾
+            if (!detectedRestName || detectedRestName.length > 40 || detectedRestName.includes("HK$")) {
+                const skipRegex = /跳過|前往主要內容|查看的位置|相較廣泛|更新以助我們|添加您的地址|Select your address|主頁|免運費|最低消費|折扣|優惠/i;
+                for(let i = 0; i < Math.min(20, lines.length); i++) {
+                    const line = lines[i];
+                    const isNumericOrRating = /^[\d\.\/\(\)\+\-\s]+$/.test(line); 
+                    
+                    if(!skipRegex.test(line) && !isNumericOrRating && line.length > 1 && line.length < 40) {
+                        detectedRestName = line;
+                        break;
+                    }
+                }
+            }
+            if(!detectedRestName) detectedRestName = "未命名餐廳";
+
+            // 2. 極致精準：提取餐點與價錢
+            const detectedItems = [];
+            // 尋找開頭是 (從 / from) HK$ 數字 的那一行
+            const priceLineRegex = /^(?:從\s*|from\s*)?(?:HK\s*)?\$?\s*\d+/i;
+            // 專門從那行把真正的數字抽出來
+            const priceExtractRegex = /(?:HK)?\$\s*(\d+(?:\.\d+)?)/i;
+
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i];
+                if (priceLineRegex.test(line)) {
+                    const match = line.match(priceExtractRegex);
+                    if (match) {
+                        const price = parseFloat(match[1]);
+                        let name = lines[i-1];
+                        
+                        // 過濾多餘字眼
+                        if (name === "人氣之選" || name === "人氣" || name === "新上市" || name === "推介" || name.includes("🔥")) {
+                            if (i >= 2) name = lines[i-2]; 
+                        }
+
+                        if (name && name.length < 80 && price > 0 && !name.includes("HK$") && !name.includes("最低消費")) {
+                            const isDuplicate = detectedItems.some(item => item.name === name && item.price === price);
+                            if (!isDuplicate) {
+                                detectedItems.push({ name, price });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (detectedItems.length === 0) {
+                resultsContainer.innerHTML = '<div class="text-center py-6 text-slate-400 font-bold text-sm">找不到餐點資料，請確定文字中包含價錢（例如 HK$ 68）。</div>';
+                document.getElementById('import-btn-confirm').classList.add('hidden');
+                return;
+            }
+
+            window.tempImportItems = detectedItems;
+            
+            resultsContainer.innerHTML = `
+                <div class="mb-4 bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                    <label class="font-black text-slate-500 text-xs mb-1.5 block">🎯 匯入至餐廳：</label>
+                    <input type="text" id="import-rest-name" value="${detectedRestName}" placeholder="請輸入餐廳名稱" class="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg font-bold text-sm outline-none focus:border-indigo-400 focus:bg-white transition-colors">
+                    <p class="text-[10px] text-slate-400 mt-1.5 leading-tight">※ 系統已自動提取名稱。若名稱不存在，將為您自動建立新餐廳。</p>
+                </div>
+
+                <div class="text-xs font-black text-slate-500 mb-2 flex justify-between items-end">
+                    <span>成功辨識 ${detectedItems.length} 項餐點：</span>
+                    <div class="flex gap-1.5">
+                        <button onclick="window.toggleAllImport(true)" class="bg-indigo-50 text-indigo-600 border border-indigo-200 px-3 py-1.5 rounded-lg active:bg-indigo-100 transition-colors">全選</button>
+                        <button onclick="window.toggleAllImport(false)" class="bg-slate-100 text-slate-500 border border-slate-200 px-3 py-1.5 rounded-lg active:bg-slate-200 transition-colors">全不選</button>
+                    </div>
+                </div>
+                <div class="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50 max-h-48 overflow-y-auto">
+                    ${detectedItems.map((item, idx) => `
+                        <label class="flex items-center justify-between p-2.5 bg-white rounded-lg border border-slate-200 shadow-sm cursor-pointer has-[:checked]:border-indigo-400 has-[:checked]:bg-indigo-50 transition-colors">
+                            <div class="flex items-center gap-2.5 overflow-hidden">
+                                <input type="checkbox" value="${idx}" checked class="w-4 h-4 accent-indigo-500 shrink-0 import-checkbox">
+                                <span class="font-bold text-sm text-slate-700 truncate">${item.name}</span>
+                            </div>
+                            <span class="font-black text-indigo-600 shrink-0 pl-2">$${item.price}</span>
+                        </label>
+                    `).join('')}
+                </div>
+            `;
+            document.getElementById('import-btn-confirm').classList.remove('hidden');
+        };
+
+        window.confirmImport = async () => {
+            const checkboxes = document.querySelectorAll('.import-checkbox:checked');
+            if (checkboxes.length === 0) return window.showToast("請至少選擇一項餐點", true);
+
+            const targetRestName = document.getElementById('import-rest-name').value.trim() || "未命名餐廳";
+            if (!window.sharedState.restaurants[targetRestName]) {
+                window.sharedState.restaurants[targetRestName] = { menu: [], sideOptions: [] };
+            }
+            
+            window.sharedState.currentRestaurant = targetRestName;
+            const selectedItems = Array.from(checkboxes).map(cb => window.tempImportItems[cb.value]);
+
+            window.sharedState.restaurants[targetRestName].menu = [
+                ...selectedItems,
+                ...(window.sharedState.restaurants[targetRestName].menu || [])
+            ];
+
+            document.getElementById('import-modal').classList.replace('flex', 'hidden');
+            window.renderAll();
+            window.showToast(`✅ 成功匯入 ${selectedItems.length} 項餐點至「${targetRestName}」！`);
             try { await window.syncShared(); } catch(e) {}
         };
 
@@ -317,12 +448,7 @@
             window.showDialog("刪除", "確定刪除嗎？", "confirm", async (r) => { 
                 if(r){ 
                     window.dailyState.orders = window.dailyState.orders.filter(o=>o.id!==id); 
-                    
-                    // 記錄可疑刪除行為
-                    if(window.dailyState.hasBeenLocked && orderToDel) {
-                        window.logAudit('⚠️ 刪除訂單', `鎖定後被刪除: ${orderToDel.user} 的 ${orderToDel.item}`);
-                    }
-
+                    if(window.dailyState.hasBeenLocked && orderToDel) window.logAudit('⚠️ 刪除訂單', `鎖定後被刪除: ${orderToDel.user} 的 ${orderToDel.item}`);
                     window.renderAll();
                     try { await window.syncDaily(); } catch(e) {}
                 }
@@ -354,11 +480,7 @@
                 actionDesc = `修改了 ${username} 的實付金額為 $${val}`;
             }
 
-            // 記錄可疑修改行為
-            if(window.dailyState.hasBeenLocked) {
-                window.logAudit('⚠️ 修改金額', `鎖定後: ${actionDesc}`);
-            }
-
+            if(window.dailyState.hasBeenLocked) window.logAudit('⚠️ 修改金額', `鎖定後: ${actionDesc}`);
             window.renderAll();
             try { await window.syncDaily(); } catch(e) {}
         };
@@ -368,7 +490,7 @@
             window.showDialog("核實帳單", `總實付額為 ${finalTotal}。\n確定要鎖定帳單嗎？`, "confirm", async (res) => {
                 if(res) { 
                     window.dailyState.isLocked = true; 
-                    window.dailyState.hasBeenLocked = true; // 標記為曾經鎖定過
+                    window.dailyState.hasBeenLocked = true; 
                     window.logAudit('✅ 帳單鎖定', `當下總額: ${finalTotal}`);
                     window.renderAll(); 
                     try { await window.syncDaily(); } catch(e) {} 
@@ -380,12 +502,7 @@
             window.showDialog("解除鎖定", "解鎖後可再次編輯訂單與金額，確定嗎？", "confirm", async (res) => {
                 if(res) { 
                     window.dailyState.isLocked = false; 
-                    
-                    // 記錄可疑解鎖行為
-                    if(window.dailyState.hasBeenLocked) {
-                        window.logAudit('⚠️ 帳單解鎖', '有人手動解除了帳單鎖定');
-                    }
-
+                    if(window.dailyState.hasBeenLocked) window.logAudit('⚠️ 帳單解鎖', '有人手動解除了帳單鎖定');
                     window.renderAll(); 
                     try { await window.syncDaily(); } catch(e) {} 
                 }
@@ -400,7 +517,6 @@
         };
 
         window.clearAllData = () => {
-            // 使用 prompt-password
             window.showDialog("⚠️ 清空資料", "請輸入管理員密碼：", "prompt-password", async (pwd) => {
                 if (pwd === "admin888") {
                     window.showDialog("最後警告", "即將刪除所有歷史訂單及餐廳菜單設定！此操作不可逆！\n您確定要清空嗎？", "confirm", async (res) => {
@@ -657,14 +773,19 @@
 
     <main class="pt-[110px] px-3 max-w-md mx-auto w-full box-border transition-all">
         <section id="sec-menu" class="space-y-4">
-            <div class="flex gap-1.5">
-                <select id="rest-sel" onchange="window.sharedState.currentRestaurant=this.value;window.renderAll();window.syncShared().catch(()=>{});" class="flex-1 min-w-0 bg-white px-2 py-2.5 rounded-xl shadow-sm border border-slate-300 font-bold text-sm outline-none"></select>
-                <button onclick="window.deleteRestaurant()" class="bg-red-50 text-red-500 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-red-200 active:bg-red-100">刪除</button>
-                <button onclick="window.showDialog('新餐廳','輸入餐廳名稱','prompt',async (n)=>{if(n){window.sharedState.restaurants[n]={menu:[],sideOptions:[]};window.sharedState.currentRestaurant=n;window.renderAll();try{await window.syncShared();}catch(e){}}})" class="bg-slate-200 text-slate-800 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-slate-300 active:bg-slate-300">＋ 餐廳</button>
+            <div class="flex flex-col gap-2">
+                <div class="flex gap-1.5">
+                    <select id="rest-sel" onchange="window.sharedState.currentRestaurant=this.value;window.renderAll();window.syncShared().catch(()=>{});" class="flex-1 min-w-0 bg-white px-2 py-2.5 rounded-xl shadow-sm border border-slate-300 font-bold text-sm outline-none"></select>
+                    <button onclick="window.deleteRestaurant()" class="bg-red-50 text-red-500 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-red-200 active:bg-red-100">刪除</button>
+                    <button onclick="window.showDialog('新餐廳','輸入餐廳名稱','prompt',async (n)=>{if(n){window.sharedState.restaurants[n]={menu:[],sideOptions:[]};window.sharedState.currentRestaurant=n;window.renderAll();try{await window.syncShared();}catch(e){}}})" class="bg-slate-200 text-slate-800 font-bold px-3 py-2.5 rounded-xl text-xs shrink-0 whitespace-nowrap shadow-sm border border-slate-300 active:bg-slate-300">＋ 餐廳</button>
+                </div>
+                <button onclick="window.openImportModal()" class="w-full bg-indigo-50 text-indigo-600 border border-indigo-200 py-2.5 rounded-xl font-black text-xs flex items-center justify-center gap-1.5 active:bg-indigo-100 shadow-sm transition-colors">
+                    🤖 從平台「智能貼上」匯入整頁菜單
+                </button>
             </div>
             
             <div id="form-add-item" class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 transition-opacity">
-                <p class="text-[10px] font-black text-slate-400 mb-2 uppercase tracking-widest">新增餐點至菜單</p>
+                <p class="text-[10px] font-black text-slate-400 mb-2 uppercase tracking-widest">手動新增餐點</p>
                 <div class="flex gap-2">
                     <input type="text" id="f-name" placeholder="餐點名稱" class="flex-[2] min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold text-sm outline-none focus:border-orange-400">
                     <input type="number" id="f-price" placeholder="價錢 $" class="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold text-sm outline-none focus:border-orange-400">
@@ -689,15 +810,8 @@
             <div id="report-container"></div>
             
             <div class="mt-10 pt-6 border-t border-slate-200 px-2 space-y-3">
-                <!-- 稽核日誌按鈕 -->
-                <button onclick="window.viewAuditLogs()" class="w-full py-3.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-xl font-black text-sm active:bg-slate-200 transition-colors shadow-sm flex items-center justify-center gap-2">
-                    🕵️ 查看系統日誌 (管理員專用)
-                </button>
-
-                <!-- 清空系統資料按鈕 -->
-                <button onclick="window.clearAllData()" class="w-full py-3.5 bg-red-50 text-red-500 border border-red-200 rounded-xl font-black text-sm active:bg-red-100 transition-colors shadow-sm flex items-center justify-center gap-2">
-                    🗑️ 清空所有系統資料
-                </button>
+                <button onclick="window.viewAuditLogs()" class="w-full py-3.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-xl font-black text-sm active:bg-slate-200 transition-colors shadow-sm flex items-center justify-center gap-2">🕵️ 查看系統日誌 (管理員專用)</button>
+                <button onclick="window.clearAllData()" class="w-full py-3.5 bg-red-50 text-red-500 border border-red-200 rounded-xl font-black text-sm active:bg-red-100 transition-colors shadow-sm flex items-center justify-center gap-2">🗑️ 清空所有系統資料</button>
             </div>
         </section>
     </main>
@@ -709,7 +823,29 @@
         </div>
     </footer>
 
-    <!-- 新增訂單 Modal -->
+    <!-- 🤖 智能匯入 Modal -->
+    <div id="import-modal" class="hidden fixed inset-0 bg-black/70 z-[60] items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center rounded-t-2xl">
+                <div>
+                    <h3 class="text-base font-black text-slate-800">🤖 智能匯入菜單</h3>
+                    <p class="text-[10px] text-slate-500 mt-0.5">自動提取餐廳名稱及原版面排序</p>
+                </div>
+                <button onclick="document.getElementById('import-modal').classList.replace('flex', 'hidden')" class="w-8 h-8 bg-slate-200 rounded-full text-slate-600 font-bold text-sm flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-4 flex-1 overflow-y-auto space-y-4">
+                <textarea id="import-textarea" rows="5" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl font-mono text-xs outline-none focus:border-indigo-400 focus:bg-white transition-colors" placeholder="請在此貼上從平台複製的全部文字..."></textarea>
+                <button onclick="window.analyzeImportText()" class="w-full py-3 bg-indigo-500 text-white font-black rounded-xl shadow-md active:bg-indigo-600 transition-colors">🔍 開始分析文字</button>
+                
+                <div id="import-results" class="mt-4"></div>
+            </div>
+            <div id="import-btn-confirm" class="hidden p-3 border-t border-slate-100 bg-white safe-pb">
+                <button onclick="window.confirmImport()" class="w-full py-3 bg-emerald-500 text-white font-black rounded-xl shadow-md active:bg-emerald-600 transition-colors">✅ 匯入選取的餐點</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 點餐 Modal -->
     <div id="modal-overlay" class="hidden fixed inset-0 bg-black/70 z-50 items-end sm:items-center justify-center sm:p-4 backdrop-blur-sm">
         <div class="bg-white w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
             <div class="p-3 text-center border-b border-slate-100 flex justify-between items-center">
@@ -732,18 +868,10 @@
     <!-- 編輯餐點 Modal -->
     <div id="edit-item-modal" class="hidden fixed inset-0 bg-black/70 z-50 items-center justify-center p-4 backdrop-blur-sm">
         <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-            <div class="p-4 text-center border-b border-slate-100 bg-slate-50">
-                <h3 class="text-base font-black text-slate-800">編輯餐點</h3>
-            </div>
+            <div class="p-4 text-center border-b border-slate-100 bg-slate-50"><h3 class="text-base font-black text-slate-800">編輯餐點</h3></div>
             <div class="p-4 space-y-4">
-                <div>
-                    <label class="font-black text-slate-500 text-xs mb-1 block">名稱</label>
-                    <input type="text" id="edit-item-name" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
-                </div>
-                <div>
-                    <label class="font-black text-slate-500 text-xs mb-1 block">價錢 ($)</label>
-                    <input type="number" id="edit-item-price" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors">
-                </div>
+                <div><label class="font-black text-slate-500 text-xs mb-1 block">名稱</label><input type="text" id="edit-item-name" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors"></div>
+                <div><label class="font-black text-slate-500 text-xs mb-1 block">價錢 ($)</label><input type="number" id="edit-item-price" class="w-full bg-slate-50 border border-slate-200 p-3 rounded-lg font-bold outline-none text-sm focus:border-orange-400 focus:bg-white transition-colors"></div>
             </div>
             <div class="p-3 border-t border-slate-100 bg-white flex gap-2">
                 <button onclick="window.deleteEditItem()" class="px-4 py-3 bg-red-50 text-red-500 font-black rounded-xl shadow-sm active:bg-red-100">刪除</button>
@@ -760,20 +888,19 @@
                 <h3 class="text-base font-black text-slate-800">🕵️ 系統操作日誌 (當日)</h3>
                 <button onclick="document.getElementById('audit-log-modal').classList.replace('flex', 'hidden')" class="w-8 h-8 bg-slate-200 rounded-full text-slate-600 font-bold text-sm flex items-center justify-center">✕</button>
             </div>
-            <div id="audit-log-content" class="p-4 overflow-y-auto space-y-1">
-                <!-- Logs inject here -->
-            </div>
+            <div id="audit-log-content" class="p-4 overflow-y-auto space-y-1"></div>
         </div>
     </div>
 
+    <!-- 通用對話框 -->
     <div id="dialog-overlay" class="hidden fixed inset-0 bg-black/70 z-[100] items-center justify-center p-6 backdrop-blur-sm">
         <div class="bg-white w-full max-w-xs rounded-2xl shadow-2xl p-6 flex flex-col gap-4">
             <h3 id="dialog-title" class="text-lg font-black text-slate-800 text-center"></h3>
             <p id="dialog-msg" class="text-slate-500 font-bold text-sm text-center whitespace-pre-line"></p>
             <input type="text" id="dialog-input" class="hidden w-full p-3 bg-slate-50 border border-slate-200 rounded-lg outline-none font-bold text-center focus:border-orange-400 focus:bg-white transition-colors">
             <div class="flex gap-2">
-                <button id="dialog-cancel" class="hidden flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl active:bg-slate-200">取消</button>
-                <button id="dialog-ok" class="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl shadow-md active:bg-orange-600">確定</button>
+                <button id="dialog-cancel" class="hidden flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl active:bg-slate-200 transition-colors">取消</button>
+                <button id="dialog-ok" class="flex-1 py-3 bg-orange-500 text-white font-black rounded-xl shadow-md active:bg-orange-600 transition-colors">確定</button>
             </div>
         </div>
     </div>
